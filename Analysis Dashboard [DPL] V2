@@ -1,0 +1,1103 @@
+//@version=5
+indicator("FVG + OB + Session + MS + Vol + Liquidity + Killzones ", "Analysis Dashboard [DPL]", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+//=============================================================================
+// 1. FVG SETTINGS (Standard)
+//=============================================================================
+// *** MASTER SWITCH ***
+show_std_fvg = input.bool(true, "Show Standard FVG", group = 'FVG Settings')
+
+thresholdPer = input.float(0, "Threshold %", minval = 0, maxval = 100, step = .1, inline = 'threshold', group = 'FVG Settings')
+auto_fvg = input(false, "Auto", inline = 'threshold', group = 'FVG Settings')
+showLast_fvg = input.int(0, 'Unmitigated Levels', minval = 0, group = 'FVG Settings')
+mitigationLevels_fvg = input.bool(false, 'Mitigation Levels', group = 'FVG Settings')
+show_ghost_fvg = input.bool(true, "Show Mitigated FVG (Ghost Mode)", group = 'FVG Settings')
+
+tf_fvg = input.timeframe('', "Timeframe", group = 'FVG Settings')
+extend_fvg = input.int(20, 'Extend', minval = 0, inline = 'extend', group = 'FVG Style')
+dynamic_fvg = input(false, 'Dynamic', inline = 'extend', group = 'FVG Style')
+fvg_bull_css = input.color(color.new(#089981, 70), "Bullish FVG", group = 'FVG Style')
+fvg_bear_css = input.color(color.new(#f23645, 70), "Bearish FVG", group = 'FVG Style')
+
+// --- FVG Filter Settings ---
+grp_filter = "Filters (Noise & Trend)"
+use_atr_filter = input.bool(true, "Filter Small FVG (Noise)", group = grp_filter)
+atr_length = input.int(14, "ATR Length", group = grp_filter)
+atr_mult = input.float(0.5, "Min Size (x ATR)", step = 0.1, tooltip = "FVG must be larger than ATR * this value", group = grp_filter)
+
+use_trend_filter = input.bool(false, "Filter Counter-Trend (EMA 200)", tooltip = "Only show Bullish signals above EMA 200 and Bearish below EMA 200", group = grp_filter)
+trend_ema_len = input.int(200, "Trend EMA Length", group = grp_filter)
+
+// --- FVG Dashboard Settings ---
+fvg_posInput = input.string("Bottom Right", "Position", options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group="FVG Dashboard Settings")
+fvg_textSizeInput = input.string("Normal", "Text Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group="FVG Dashboard Settings")
+
+
+//=============================================================================
+// 2. ORDER BLOCK SETTINGS
+//=============================================================================
+grp_ob = 'Order Block Settings'
+show_ob_indicator = input.bool(true, "Show Order Blocks", group = grp_ob)
+
+ob_length = input.int(5, 'Volume Pivot Length', minval = 1, group = grp_ob)
+ob_bull_ext = input.int(3, 'Bullish OB Extend', minval = 1, group = grp_ob)
+ob_bear_ext = input.int(3, 'Bearish OB Extend', minval = 1, group = grp_ob)
+ob_mitigation_type = input.string('Wick', 'Mitigation Method', options = ['Wick', 'Close'], group = grp_ob)
+ob_bull_bg = input.color(color.new(#169400, 80), 'Bull OB Background', group = 'Order Block Style')
+ob_bull_border = input.color(#169400, 'Bull OB Border', group = 'Order Block Style')
+ob_bear_bg = input.color(color.new(#ff1100, 80), 'Bear OB Background', group = 'Order Block Style')
+ob_bear_border = input.color(#ff1100, 'Bear OB Border', group = 'Order Block Style')
+
+
+//=============================================================================
+// 3. SESSION STREAKS SETTINGS
+//=============================================================================
+SS_GREEN                = #089981
+SS_RED                  = #F23645
+SS_BULLISH              = 'Bullish'
+SS_BEARISH              = 'Bearish'
+SS_HORIZONTAL           = 'Horizontal'
+SS_VERTICAL             = 'Vertical'
+SS_TOP_RIGHT            = 'Top Right'
+SS_BOTTOM_RIGHT         = 'Bottom Right'
+SS_BOTTOM_LEFT          = 'Bottom Left'
+SS_DASHBOARD_GROUP      = 'Session Streaks Dashboard'
+SS_STYLE_GROUP          = 'Session Streaks Style'
+SS_MAIN_GROUP           = 'Session Streaks General'
+
+show_ss_indicator       = input.bool(   true,       'Show Session Streaks Indicator', group=SS_MAIN_GROUP) 
+
+ss_dashboardInput       = input.bool(   true,       'Show Dashboard',        group=SS_DASHBOARD_GROUP)
+ss_dashboardPositionInput = input.string( SS_TOP_RIGHT,  'Position',         group=SS_DASHBOARD_GROUP, options = [SS_TOP_RIGHT,SS_BOTTOM_RIGHT,SS_BOTTOM_LEFT])
+ss_dashboardSizeInput   = input.string( 'Normal',     'Size',             group=SS_DASHBOARD_GROUP,      options = ['Tiny','Small','Normal','Large','Huge'])
+
+ss_bullishColorInput    = input.color(  SS_GREEN,      'Bullish',           group = SS_STYLE_GROUP)
+ss_bearishColorInput    = input.color(  SS_RED,        'Bearish',           group = SS_STYLE_GROUP)
+ss_transparencyInput    = input.int(    80,         'Transparency',     group = SS_STYLE_GROUP)
+ss_gradientTypeInput    = input.string( SS_HORIZONTAL, 'Gradient',         group = SS_STYLE_GROUP, options = [SS_HORIZONTAL,SS_VERTICAL])
+
+
+//=============================================================================
+// 4. TREND LOGIC
+//=============================================================================
+ema_trend = ta.ema(close, trend_ema_len)
+plot(use_trend_filter ? ema_trend : na, "Trend EMA", color=color.gray, linewidth=2)
+
+is_trend_bullish() => close > ema_trend
+is_trend_bearish() => close < ema_trend
+
+
+//=============================================================================
+// 5. FVG LOGIC (Standard Dashboard)
+//=============================================================================
+type fvg
+    float max
+    float min
+    bool  isbull
+    int   t = time
+
+n = bar_index
+
+detect_fvg(use_filter, length, mult, use_trend)=>
+    var new_fvg = fvg.new(na, na, na, na)
+    threshold = auto_fvg ? ta.cum((high - low) / low) / bar_index : thresholdPer / 100
+    
+    bull_basic = low > high[2] and close[1] > high[2] and (low - high[2]) / high[2] > threshold
+    bear_basic = high < low[2] and close[1] < low[2] and (low[2] - high) / high > threshold
+    
+    current_atr = ta.atr(length)
+    min_gap_size = current_atr * mult
+    
+    bull_gap_size = low - high[2]
+    bear_real_gap = low[2] - high
+    
+    is_bull_valid = bull_basic
+    is_bear_valid = bear_basic
+    
+    if use_filter
+        if bull_basic and (bull_gap_size < min_gap_size)
+            is_bull_valid := false
+        if bear_basic and (bear_real_gap < min_gap_size)
+            is_bear_valid := false
+            
+    if use_trend
+        if is_trend_bullish() and bear_basic
+            is_bear_valid := false
+        if is_trend_bearish() and bull_basic
+            is_bull_valid := false
+
+    if is_bull_valid
+        new_fvg := fvg.new(low, high[2], true)
+    else if is_bear_valid
+        new_fvg := fvg.new(low[2], high, false)
+        
+    [is_bull_valid, is_bear_valid, new_fvg]
+
+var float max_bull_fvg = na, var float min_bull_fvg = na
+var float max_bear_fvg = na, var float min_bear_fvg = na
+var t_fvg = 0
+var int fvg_bull_created = 0, var int fvg_bull_touched = 0
+var int fvg_bear_created = 0, var int fvg_bear_touched = 0
+var fvg_records = array.new<fvg>(0)
+var fvg_areas = array.new<box>(0)
+
+// Calculate but only if enabled
+[bull_fvg, bear_fvg, new_fvg] = request.security(syminfo.tickerid, tf_fvg, detect_fvg(use_atr_filter, atr_length, atr_mult, use_trend_filter))
+
+var alert_msg = ""
+
+// Only process FVG logic if switch is ON
+if show_std_fvg
+    if bull_fvg and new_fvg.t != t_fvg
+        if dynamic_fvg
+            max_bull_fvg := new_fvg.max
+            min_bull_fvg := new_fvg.min
+        if not dynamic_fvg
+            fvg_areas.unshift(box.new(n-2, new_fvg.max, n+extend_fvg, new_fvg.min, na, bgcolor = fvg_bull_css))
+        fvg_records.unshift(new_fvg)
+        fvg_bull_created += 1  
+        t_fvg := new_fvg.t
+        alert_msg := "🟢 Bullish FVG Created\nPrice: " + str.tostring(new_fvg.max) + "\nSL: " + str.tostring(new_fvg.min)
+        alert(alert_msg, alert.freq_once_per_bar_close)
+
+    else if dynamic_fvg
+        max_bull_fvg := math.max(math.min(close, max_bull_fvg), min_bull_fvg)
+
+    if bear_fvg and new_fvg.t != t_fvg
+        if dynamic_fvg
+            max_bear_fvg := new_fvg.max
+            min_bear_fvg := new_fvg.min
+        if not dynamic_fvg
+            fvg_areas.unshift(box.new(n-2, new_fvg.max, n+extend_fvg, new_fvg.min, na, bgcolor = fvg_bear_css))
+        fvg_records.unshift(new_fvg)
+        fvg_bear_created += 1 
+        t_fvg := new_fvg.t
+        alert_msg := "🔴 Bearish FVG Created\nPrice: " + str.tostring(new_fvg.min) + "\nSL: " + str.tostring(new_fvg.max)
+        alert(alert_msg, alert.freq_once_per_bar_close)
+
+    else if dynamic_fvg
+        min_bear_fvg := math.min(math.max(close, min_bear_fvg), max_bear_fvg) 
+
+    // --- MITIGATION LOGIC (With Ghost Mode Toggle) ---
+    if fvg_records.size() > 0
+        for i = fvg_records.size()-1 to 0
+            get = fvg_records.get(i)
+            bool mitigated = false
+            
+            if get.isbull
+                if close < get.min 
+                    if mitigationLevels_fvg
+                        line.new(get.t, get.min, time, get.min, xloc.bar_time, color = fvg_bull_css, style = line.style_dashed)
+                    mitigated := true
+                    fvg_bull_touched += 1 
+
+            else if close > get.max 
+                if mitigationLevels_fvg
+                    line.new(get.t, get.max, time, get.max, xloc.bar_time, color = fvg_bear_css, style = line.style_dashed)
+                mitigated := true
+                fvg_bear_touched += 1 
+                
+            if mitigated
+                if not dynamic_fvg
+                    area = fvg_areas.get(i)
+                    if show_ghost_fvg
+                        // Ghost Mode ON: Change color
+                        box.set_bgcolor(area, color.new(color.gray, 90))
+                        box.set_border_color(area, color.new(color.gray, 80))
+                    else
+                        // Ghost Mode OFF: Delete box
+                        box.delete(area)
+                    
+                    // Remove reference from array (we handled the visual above)
+                    fvg_areas.remove(i)
+                
+                // Always remove data record
+                fvg_records.remove(i)
+
+max_bull_plot = plot(max_bull_fvg, color = na, display = display.none)
+min_bull_plot = plot(min_bull_fvg, color = na, display = display.none)
+fill(max_bull_plot, min_bull_plot, color = fvg_bull_css)
+max_bear_plot = plot(max_bear_fvg, color = na, display = display.none)
+min_bear_plot = plot(min_bear_fvg, color = na, display = display.none)
+fill(max_bear_plot, min_bear_plot, color = fvg_bear_css)
+
+
+//=============================================================================
+// 6. ORDER BLOCK LOGIC
+//=============================================================================
+get_coordinates_ob(condition, top, btm, ob_val)=>
+    var ob_top  = array.new_float(0)
+    var ob_btm  = array.new_float(0)
+    var ob_avg  = array.new_float(0)
+    var ob_left = array.new_int(0)
+    float ob = na
+    if condition
+        avg = math.avg(top, btm)
+        array.unshift(ob_top, top)
+        array.unshift(ob_btm, btm)
+        array.unshift(ob_avg, avg)
+        array.unshift(ob_left, time[ob_length])
+        ob := ob_val
+    [ob_top, ob_btm, ob_avg, ob_left, ob]
+
+remove_mitigated_ob(ob_top, ob_btm, ob_left, ob_avg, target, bull)=>
+    mitigated = false
+    target_array = bull ? ob_btm : ob_top
+    for element in target_array
+        idx = array.indexof(target_array, element)
+        if (bull ? target < element : target > element)
+            mitigated := true
+            array.remove(ob_top, idx)
+            array.remove(ob_btm, idx)
+            array.remove(ob_avg, idx)
+            array.remove(ob_left, idx)
+    mitigated
+
+set_order_blocks(ob_top, ob_btm, ob_left, ob_avg, ext_last, bg_css, border_css)=>
+    var ob_box = array.new_box(0)
+    if barstate.isfirst
+        for i = 0 to ext_last-1
+            array.unshift(ob_box, box.new(na,na,na,na, xloc = xloc.bar_time, extend= extend.right, bgcolor = bg_css, border_color = color.new(border_css, 70)))
+    if barstate.islast
+        if array.size(ob_top) > 0
+            for i = 0 to math.min(ext_last-1, array.size(ob_top)-1)
+                get_box = array.get(ob_box, i)
+                box.set_lefttop(get_box, array.get(ob_left, i), array.get(ob_top, i))
+                box.set_rightbottom(get_box, array.get(ob_left, i), array.get(ob_btm, i))
+
+// *** OB EXECUTION BLOCK ***
+var bull_ob = float(na)
+var bear_ob = float(na)
+
+if show_ob_indicator
+    upper = ta.highest(ob_length)
+    lower = ta.lowest(ob_length)
+    target_bull = ob_mitigation_type == 'Close' ? ta.lowest(close, ob_length) : lower
+    target_bear = ob_mitigation_type == 'Close' ? ta.highest(close, ob_length) : upper
+    var os = 0
+    os := high[ob_length] > upper ? 0 : low[ob_length] < lower ? 1 : os[1]
+    phv = ta.pivothigh(volume, ob_length, ob_length)
+    
+    [bull_top, bull_btm, bull_avg, bull_left, ob_b] = get_coordinates_ob(phv and os == 1, hl2[ob_length], low[ob_length], low[ob_length])
+    [bear_top, bear_btm, bear_avg, bear_left, ob_br] = get_coordinates_ob(phv and os == 0, high[ob_length], hl2[ob_length], high[ob_length])
+    
+    if use_trend_filter
+        if is_trend_bearish() 
+            array.clear(bull_top), array.clear(bull_btm), array.clear(bull_avg), array.clear(bull_left)
+            ob_b := na
+        if is_trend_bullish() 
+            array.clear(bear_top), array.clear(bear_btm), array.clear(bear_avg), array.clear(bear_left)
+            ob_br := na
+
+    bull_ob := ob_b
+    bear_ob := ob_br
+    
+    if not na(bull_ob)
+        alert("🟢 Bullish OB Created\nPrice: " + str.tostring(bull_ob), alert.freq_once_per_bar_close)
+    if not na(bear_ob)
+        alert("🔴 Bearish OB Created\nPrice: " + str.tostring(bear_ob), alert.freq_once_per_bar_close)
+    
+    remove_mitigated_ob(bull_top, bull_btm, bull_left, bull_avg, target_bull, true)
+    remove_mitigated_ob(bear_top, bear_btm, bear_left, bear_avg, target_bear, false)
+    set_order_blocks(bull_top, bull_btm, bull_left, bull_avg, ob_bull_ext, ob_bull_bg, ob_bull_border)
+    set_order_blocks(bear_top, bear_btm, bear_left, bear_avg, ob_bear_ext, ob_bear_bg, ob_bear_border)
+
+
+//=============================================================================
+// 7. SESSION STREAKS LOGIC
+//=============================================================================
+type session
+    int startTime
+    int endTime            
+    float openPrice
+    float closePrice
+    float top
+    float bottom
+    float labelTop
+    float labelBottom
+    int timeClose   = na
+    label tag       = na
+    line topLine    = na
+    line bottomLine = na
+    
+type streak
+    string bias
+    int number
+
+var array<session> sessions     = array.new<session>()
+var array<int> bullishStreaks   = array.new<int>()
+var array<int> bearishStreaks   = array.new<int>()
+var currentStreak               = streak.new('',0)
+bool sessionStart               = session.isfirstbar_regular
+bool largerThanDailyTimeframe   = timeframe.in_seconds() > 86400      
+
+var parsedDashboardPosition     = switch ss_dashboardPositionInput
+    SS_TOP_RIGHT      => position.top_right
+    SS_BOTTOM_RIGHT   => position.bottom_right
+    SS_BOTTOM_LEFT    => position.bottom_left
+
+var parsedDashboardSize         = switch ss_dashboardSizeInput
+    'Tiny'            => size.tiny
+    'Small'           => size.small
+    'Normal'          => size.normal
+    'Large'           => size.large
+    'Huge'            => size.huge
+
+var table t_able                = table.new(parsedDashboardPosition,3,12, bgcolor = #1e222d, border_color = #373a46, border_width = 1, frame_color = #373a46, frame_width = 1)
+
+gatherStatistics() =>
+    var bool wasLastBullish     = true
+    if sessions.size() > 0        
+        session currentSession  = sessions.last()
+        bool bullishSession     = currentSession.closePrice >= currentSession.openPrice
+        if bullishSession
+            if bullishStreaks.size() > 0 and wasLastBullish
+                int lastIdx = bullishStreaks.size() - 1
+                bullishStreaks.set(lastIdx, bullishStreaks.get(lastIdx) + 1)
+            else
+                bullishStreaks.push(1)
+        else
+            if bearishStreaks.size() > 0 and not wasLastBullish
+                int lastIdx = bearishStreaks.size() - 1
+                bearishStreaks.set(lastIdx, bearishStreaks.get(lastIdx) + 1)
+            else
+                bearishStreaks.push(1)
+        wasLastBullish := bullishSession
+
+gatherData() =>
+    if sessionStart
+        gatherStatistics()
+        if sessions.size() > 500
+            sessions.shift()
+        sessions.push(session.new(time,time,open,close,high,low))        
+                        
+    if sessions.size() > 0
+        session currentSession      = sessions.last()
+        currentSession.endTime      := time
+        currentSession.closePrice   := close
+        currentSession.top          := math.max(currentSession.top,high)
+        currentSession.bottom       := math.min(currentSession.bottom,low)
+        currentSession.labelTop     := currentSession.top
+        currentSession.labelBottom  := currentSession.bottom
+
+getHTFSession() => session.new(time,time,open,close,high,low,time_close)
+
+gatherDataHTF() =>    
+    gatherStatistics()
+    if sessions.size() > 500
+        sessions.shift()
+    session lastSession     = request.security('','D',getHTFSession())
+    lastSession.startTime   := time
+    lastSession.endTime     := time
+    lastSession.labelTop    := high
+    lastSession.labelBottom := low
+    sessions.push(lastSession)
+
+cell(table t_able, int column, int row, string data, color = color.white, align = text.align_right) => t_able.cell(column,row,data,text_color = color, text_size = parsedDashboardSize, text_halign = align)
+cellBG(table t_able, int column, int row, string data, color background, color = color.white, align = text.align_right) => t_able.cell(column,row,data,text_color = color, text_size = parsedDashboardSize, text_halign = align, bgcolor = background)
+
+updateDashboard() =>
+    color currentColor  = sessions.size() > 0 ? (sessions.last().closePrice >= sessions.last().openPrice ? ss_bullishColorInput : ss_bearishColorInput) : color(na)
+    string currentTag   = sessions.size() > 0 ? sessions.last().tag.get_text() : ''
+    cellBG(t_able,1,0,currentTag,color.new(currentColor,ss_transparencyInput),currentColor,align = text.align_center)
+
+drawDashboard() =>    
+    t_able.merge_cells(1,0,2,0)
+    cell(t_able,0,0,'Current',  align = text.align_center)    
+    t_able.merge_cells(0,1,2,1)
+    cell(t_able,0,1,'Streaks',  align = text.align_center)
+    cell(t_able,1,2,'Bullish',  align = text.align_center)
+    cell(t_able,2,2,'Bearish',  align = text.align_center)
+    cell(t_able,0,3,'Number',   align = text.align_left)
+    cell(t_able,0,4,'Median',   align = text.align_left)
+    cell(t_able,0,5,'Mode',     align = text.align_left)        
+    updateDashboard()
+    array<int> parsedBullishStreaks = array.new<int>()
+    for eachStreak in bullishStreaks
+        if eachStreak > 1
+            parsedBullishStreaks.push(eachStreak)
+    array<int> parsedBearishStreaks = array.new<int>()
+    for eachStreak in bearishStreaks
+        if eachStreak > 1
+            parsedBearishStreaks.push(eachStreak)
+    cell(t_able,1,3,str.format('{0, number, 0}',parsedBullishStreaks.size()))
+    cell(t_able,2,3,str.format('{0, number, 0}',parsedBearishStreaks.size()))
+    cell(t_able,1,4,str.format('{0, number, 0.00}',parsedBullishStreaks.median()))
+    cell(t_able,2,4,str.format('{0, number, 0.00}',parsedBearishStreaks.median()))
+    cell(t_able,1,5,str.format('{0, number, 0.00}',parsedBullishStreaks.mode()))
+    cell(t_able,2,5,str.format('{0, number, 0.00}',parsedBearishStreaks.mode()))
+
+drawSession(session currentSession) =>    
+    bool bullishArea = currentSession.closePrice >= currentSession.openPrice
+    if bullishArea
+        if currentStreak.bias == SS_BULLISH
+            currentStreak.number    += 1
+        else
+            currentStreak.bias      := SS_BULLISH
+            currentStreak.number    := 1
+    else
+        if currentStreak.bias == SS_BEARISH
+            currentStreak.number    += 1
+        else
+            currentStreak.bias      := SS_BEARISH
+            currentStreak.number    := 1
+    string currentTag   = currentStreak.bias +' ('+ str.tostring(currentStreak.number) +')'
+    color currentColor  = bullishArea ? ss_bullishColorInput : ss_bearishColorInput
+    currentSession.tag.delete()
+    currentSession.topLine.delete()
+    currentSession.bottomLine.delete()
+    currentSession.tag          := label.new(chart.point.new(currentSession.startTime + math.round(0.5*(currentSession.endTime - currentSession.startTime)),na,bullishArea ? currentSession.labelBottom : currentSession.labelTop),currentTag,xloc.bar_time,yloc.price,color(na),bullishArea ? label.style_label_up : label.style_label_down, currentColor, size.normal)
+    currentSession.topLine      := line.new(chart.point.new(currentSession.startTime,na,currentSession.top),chart.point.new(currentSession.endTime,na,currentSession.top),xloc.bar_time, color = color.new(currentColor,50))
+    currentSession.bottomLine   := line.new(chart.point.new(currentSession.startTime,na,currentSession.bottom),chart.point.new(currentSession.endTime,na,currentSession.bottom),xloc.bar_time, color = color.new(currentColor,50))                           
+    
+drawSessions() =>    
+    for eachSession in sessions
+        drawSession(eachSession)
+
+// --- EXECUTION WITH SWITCH CHECK ---
+if show_ss_indicator
+    if timeframe.isintraday
+        gatherData()
+    else
+        gatherDataHTF()
+
+    if barstate.islastconfirmedhistory
+        drawSessions()
+        if ss_dashboardInput
+            drawDashboard()   
+            
+    if barstate.islast
+        if timeframe.isintraday
+            currentStreak.number -= 1
+        drawSession(sessions.last())
+        if ss_dashboardInput
+            updateDashboard()
+
+// --- PLOTS WITH SWITCH CHECK ---
+bool existingSessions   = sessions.size() > 0
+float topLevel          = show_ss_indicator and existingSessions ? (sessions.last().top) : na
+float bottomLevel       = show_ss_indicator and existingSessions ? (sessions.last().bottom) : na
+color fillColor         = show_ss_indicator and existingSessions ? (sessionStart ? na : (sessions.last().closePrice >= sessions.last().openPrice ? ss_bullishColorInput : ss_bearishColorInput)) : color(na)
+float delta             = show_ss_indicator and existingSessions ? close - sessions.last().openPrice : na
+float smooth            = ta.sma(math.sign(delta), 10)
+color smoothGradient    = color.from_gradient(smooth, -1, 1, color.new(ss_bearishColorInput,ss_transparencyInput),color.new(ss_bullishColorInput,ss_transparencyInput))
+
+topPlot                 = plot(topLevel,    'Top',      color.new(fillColor,ss_transparencyInput), style = plot.style_linebr)
+bottomPlot              = plot(bottomLevel, 'Bottom',   color.new(fillColor,ss_transparencyInput), style = plot.style_linebr)
+
+fill(topPlot,bottomPlot,ss_gradientTypeInput == SS_VERTICAL ? smoothGradient : color(na))
+fill(topPlot,bottomPlot,topLevel,bottomLevel,ss_gradientTypeInput == SS_HORIZONTAL ? color.new(ss_bullishColorInput,ss_transparencyInput) : color(na),ss_gradientTypeInput == SS_HORIZONTAL ? color.new(ss_bearishColorInput,ss_transparencyInput) : color(na))
+
+
+//=============================================================================
+// 8. FVG DASHBOARD
+//=============================================================================
+total_created = fvg_bull_created + fvg_bear_created
+total_touched = fvg_bull_touched + fvg_bear_touched
+pct_bull_touched = fvg_bull_created > 0 ? (float(fvg_bull_touched) / float(fvg_bull_created)) * 100 : 0.0
+pct_bear_touched = fvg_bear_created > 0 ? (float(fvg_bear_touched) / float(fvg_bear_created)) * 100 : 0.0
+pct_total_touched = total_created > 0 ? (float(total_touched) / float(total_created)) * 100 : 0.0
+
+var fvg_tablePosition = fvg_posInput == "Top Right" ? position.top_right : fvg_posInput == "Bottom Right" ? position.bottom_right : fvg_posInput == "Top Left" ? position.top_left : position.bottom_left
+var fvg_tableTextSize = fvg_textSizeInput == "Tiny" ? size.tiny : fvg_textSizeInput == "Small" ? size.small : fvg_textSizeInput == "Normal" ? size.normal : fvg_textSizeInput == "Large" ? size.large : size.huge
+var fvg_bgHeader = #363a45 
+var fvg_bgRow1 = #1e222d   
+var fvg_bgRow2 = #363a45 
+var fvg_colGreen = #089981 
+var fvg_colRed = #f23645 
+var fvg_colYellow = #ffeb3b
+var fvg_colWhite = color.white
+
+var table statsTable = table.new(fvg_tablePosition, columns = 4, rows = 4, border_width = 1, border_color = #555555)
+
+if barstate.islast
+    table.cell(statsTable, 0, 0, "FVG Stats", bgcolor = fvg_colYellow, text_color = color.black, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 1, 0, "Buy", bgcolor = fvg_bgHeader, text_color = fvg_colGreen, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 2, 0, "Sell", bgcolor = fvg_bgHeader, text_color = fvg_colRed, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 3, 0, "Total", bgcolor = fvg_bgHeader, text_color = fvg_colYellow, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 0, 1, "Created", bgcolor = fvg_bgHeader, text_color = fvg_colWhite, text_size = fvg_tableTextSize, text_halign = text.align_left)
+    table.cell(statsTable, 1, 1, str.tostring(fvg_bull_created), bgcolor = fvg_bgRow1, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 2, 1, str.tostring(fvg_bear_created), bgcolor = fvg_bgRow1, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 3, 1, str.tostring(total_created), bgcolor = fvg_bgRow1, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 0, 2, "Touched", bgcolor = fvg_bgHeader, text_color = fvg_colWhite, text_size = fvg_tableTextSize, text_halign = text.align_left)
+    table.cell(statsTable, 1, 2, str.tostring(fvg_bull_touched), bgcolor = fvg_bgRow2, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 2, 2, str.tostring(fvg_bear_touched), bgcolor = fvg_bgRow2, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 3, 2, str.tostring(total_touched), bgcolor = fvg_bgRow2, text_color = fvg_colWhite, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 0, 3, "% Touched", bgcolor = fvg_bgHeader, text_color = fvg_colWhite, text_size = fvg_tableTextSize, text_halign = text.align_left)
+    table.cell(statsTable, 1, 3, str.tostring(pct_bull_touched, "#.##") + "%", bgcolor = fvg_bgRow1, text_color = fvg_colGreen, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 2, 3, str.tostring(pct_bear_touched, "#.##") + "%", bgcolor = fvg_bgRow1, text_color = fvg_colRed, text_size = fvg_tableTextSize)
+    table.cell(statsTable, 3, 3, str.tostring(pct_total_touched, "#.##") + "%", bgcolor = fvg_bgRow1, text_color = fvg_colYellow, text_size = fvg_tableTextSize)
+
+//Original Alerts
+alertcondition(fvg_bull_created > fvg_bull_created[1], 'Bullish FVG', 'Bullish FVG detected')
+alertcondition(fvg_bear_created > fvg_bear_created[1], 'Bearish FVG', 'Bearish FVG detected')
+alertcondition(show_ob_indicator and not na(bull_ob), 'Bullish OB', 'Bullish OB detected')
+alertcondition(show_ob_indicator and not na(bear_ob), 'Bearish OB', 'Bearish OB detected')
+
+//=============================================================================
+// 9. MARKET STRUCTURE (LuxAlgo Modified)
+//=============================================================================
+//-----------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------
+ms_grp_main = '9. Market Structure (LuxAlgo)'
+ms_len = input.int(10, 'Structure Length (Higher = Less Noise)', minval = 3, group = ms_grp_main)
+
+//Colors
+ms_showBull = input(true, 'Show Bullish Structures', inline = 'ms_bull', group = ms_grp_main)
+ms_bullCss = input.color(#089981, '', inline = 'ms_bull', group = ms_grp_main)
+
+ms_showBear = input(true, 'Show Bearish Structures', inline = 'ms_bear', group = ms_grp_main)
+ms_bearCss = input.color(#f23645, '', inline = 'ms_bear', group = ms_grp_main)
+
+// Added Trend Filter Input
+ms_use_trend = input.bool(false, "Filter Counter-Trend (EMA 200)", group = ms_grp_main, tooltip="If ON: Only shows Bullish BOS when price > EMA 200, and Bearish BOS when price < EMA 200")
+
+// Label Settings (High Visibility)
+ms_chartLblSize = input.string('Normal', 'Label Size', options = ['Tiny', 'Small', 'Normal', 'Large'], group = ms_grp_main)
+ms_chartLblColor = input.color(color.white, 'Label Color', group = ms_grp_main)
+
+ms_showSupport = input(false, 'Show Support Lines', inline = 'ms_s', group = ms_grp_main)
+ms_supCss = input.color(#089981, '', inline = 'ms_s', group = ms_grp_main)
+
+ms_showResistance = input(false, 'Show Resistance Lines', inline = 'ms_r', group = ms_grp_main)
+ms_resCss = input.color(#f23645, '', inline = 'ms_r', group = ms_grp_main)
+
+//Dashboard (LuxAlgo - Classic Box Style)
+ms_showDash  = input(false, 'Show Structure Dashboard', group = ms_grp_main)
+ms_dashLoc  = input.string('Top Right', 'Location', options = ['Top Right', 'Bottom Right', 'Bottom Left'], group = ms_grp_main)
+ms_textSize = input.string('Small', 'Size'                 , options = ['Tiny', 'Small', 'Normal']                 , group = ms_grp_main)
+
+//-----------------------------------------------------------------------------
+// Types
+//-----------------------------------------------------------------------------
+type ms_fractal
+    float value
+    int loc
+    bool iscrossed
+
+//-----------------------------------------------------------------------------
+// Fractal Detection
+//-----------------------------------------------------------------------------
+var ms_p = int(ms_len/2)
+// using 'n' from main script (bar_index)
+
+ms_dh = math.sum(math.sign(high - high[1]), ms_p)
+ms_dl = math.sum(math.sign(low - low[1]), ms_p)
+
+ms_bullf = ms_dh == -ms_p and ms_dh[ms_p] == ms_p and high[ms_p] == ta.highest(ms_len)
+ms_bearf = ms_dl == ms_p and ms_dl[ms_p] == -ms_p and low[ms_p] == ta.lowest(ms_len)
+
+ms_bullf_count = ta.cum(ms_bullf ? 1 : 0)
+ms_bearf_count = ta.cum(ms_bearf ? 1 : 0)
+
+// Map Size Input
+var ms_lbl_size_const = ms_chartLblSize == 'Tiny' ? size.tiny : ms_chartLblSize == 'Small' ? size.small : ms_chartLblSize == 'Normal' ? size.normal : size.large
+
+//-----------------------------------------------------------------------------
+// Bullish market structure
+//-----------------------------------------------------------------------------
+var ms_upper = ms_fractal.new()
+var line ms_lower_lvl = na
+var label ms_lbl = na
+var ms_bull_count = 0
+var ms_broken_sup = false
+var ms_os = 0
+
+// Trend Filtering Condition
+bool ms_trend_ok_bull = ms_use_trend ? is_trend_bullish() : true
+
+if ms_bullf
+    ms_upper.value := high[ms_p]
+    ms_upper.loc := n-ms_p
+    ms_upper.iscrossed := false
+
+if ta.crossover(close, ms_upper.value) and not ms_upper.iscrossed and ms_trend_ok_bull
+    line.new(ms_upper.loc, ms_upper.value, n, ms_upper.value, color = ms_showBull ? ms_bullCss : na)
+
+    ms_lbl := label.new(int(math.avg(n, ms_upper.loc)), ms_upper.value, ms_os == -1 ? 'ChoCH' : 'BOS'
+      , color = color(na)
+      , textcolor = ms_showBull ? ms_chartLblColor : na
+      , style = label.style_label_down
+      , size = ms_lbl_size_const)
+
+    //Set support
+    ms_k = 2
+    ms_min = low[1]
+    for i = 2 to (n - ms_upper.loc)-1
+        ms_min := math.min(low[i], ms_min)
+        ms_k := low[i] == ms_min ? i : ms_k
+
+    if ms_showSupport
+        ms_lower_lvl := line.new(n-ms_k, ms_min, n, ms_min, color = ms_bullCss, style = line.style_dashed)
+        ms_broken_sup := false
+
+    ms_upper.iscrossed := true
+    ms_bull_count += 1
+    ms_os := 1
+
+else if ms_showSupport and not ms_broken_sup
+    ms_lower_lvl.set_x2(n)
+
+    if close < ms_lower_lvl.get_y2()
+        ms_broken_sup := true
+
+//-----------------------------------------------------------------------------
+// Bearish market structure
+//-----------------------------------------------------------------------------
+var ms_lower = ms_fractal.new()
+var line ms_upper_lvl = na
+var ms_broken_res = false
+var ms_bear_count = 0
+
+if ms_bearf
+    ms_lower.value := low[ms_p]
+    ms_lower.loc := n-ms_p
+    ms_lower.iscrossed := false
+
+// Condition: Breakout AND Not Crossed AND (Trend Filter OFF OR Trend is Bearish)
+bool ms_trend_ok_bear = ms_use_trend ? is_trend_bearish() : true
+
+if ta.crossunder(close, ms_lower.value) and not ms_lower.iscrossed and ms_trend_ok_bear
+    line.new(ms_lower.loc, ms_lower.value, n, ms_lower.value, color = ms_showBear ? ms_bearCss : na)
+    
+    label.new(int(math.avg(n, ms_lower.loc)), ms_lower.value, ms_os == 1 ? 'ChoCH' : 'BOS'
+      , color = color(na)
+      , textcolor = ms_showBear ? ms_chartLblColor : na
+      , style = label.style_label_up
+      , size = ms_lbl_size_const)
+
+    //Set resistance
+    ms_k = 2
+    ms_max = high[1]
+    for i = 2 to (n - ms_lower.loc)-1
+        ms_max := math.max(high[i], ms_max)
+        ms_k := high[i] == ms_max ? i : ms_k
+
+    if ms_showResistance
+        ms_upper_lvl := line.new(n-ms_k, ms_max, n, ms_max, color = ms_bearCss, style = line.style_dashed)
+        ms_broken_res := false
+    
+    ms_lower.iscrossed := true
+    ms_bear_count += 1
+    ms_os := -1
+
+else if ms_showResistance and not ms_broken_res
+    ms_upper_lvl.set_x2(n)
+
+    if close > ms_upper_lvl.get_y2()
+        ms_broken_res := true
+
+//-----------------------------------------------------------------------------
+// Dashboard (LuxAlgo - Classic Equal Alignment)
+//-----------------------------------------------------------------------------
+var ms_table_position = ms_dashLoc == 'Bottom Left' ? position.bottom_left 
+  : ms_dashLoc == 'Top Right' ? position.top_right 
+  : position.bottom_right
+
+var ms_table_size = ms_textSize == 'Tiny' ? size.tiny 
+  : ms_textSize == 'Small' ? size.small 
+  : size.normal
+
+// Standard Table with Borders
+var ms_tb = table.new(ms_table_position, 2, 3
+  , bgcolor = #1e222d
+  , border_color = #373a46
+  , border_width = 1
+  , frame_color = #373a46
+  , frame_width = 1)
+
+if ms_showDash
+    if barstate.isfirst
+        ms_tb.cell(0, 0, 'Structure To Fractal %', text_color = color.white, text_size = ms_table_size, text_halign = text.align_center)
+        ms_tb.merge_cells(0,0,1,0)
+
+        // Added text_halign=center to ensure perfect alignment
+        ms_tb.cell(0, 1, 'Bullish', text_color = ms_bullCss, text_size = ms_table_size, text_halign = text.align_center)
+        ms_tb.cell(1, 1, 'Bearish', text_color = ms_bearCss, text_size = ms_table_size, text_halign = text.align_center)
+    
+    if barstate.islast
+        // Added text_halign=center to ensure perfect alignment
+        ms_tb.cell(0, 2, str.tostring(ms_bull_count / ms_bullf_count * 100, format.percent), text_color = ms_bullCss, text_size = ms_table_size, text_halign = text.align_center)
+        ms_tb.cell(1, 2, str.tostring(ms_bear_count / ms_bearf_count * 100, format.percent), text_color = ms_bearCss, text_size = ms_table_size, text_halign = text.align_center)
+
+//-----------------------------------------------------------------------------
+// Plots
+//-----------------------------------------------------------------------------
+plot(ms_broken_res and not ms_broken_res[1] ? low : na, 'Resistance Breakout', #089981, 2, plot.style_circles)
+plot(ms_broken_sup and not ms_broken_sup[1] ? high : na, 'Support Breakout', #f23645, 2, plot.style_circles)
+
+//=============================================================================
+// 10. FVG VOLUME PROFILE (ChartPrime Integration)
+//=============================================================================
+// --------------------------------------------------------------------------------------------------------------------}
+// 📌 USER INPUTS (ChartPrime)
+// --------------------------------------------------------------------------------------------------------------------{
+vol_grp = "10. FVG Volume Profile (ChartPrime)"
+// *** MASTER SWITCH FOR VOLUME FVG ***
+vol_enable_fvg = input.bool(true, "Show Volume FVG System", group = vol_grp)
+
+vol_autoTf = input.bool(true, "Auto", inline = "1", group = vol_grp)
+vol_tf1 = input.timeframe(
+     "10", 
+     "", 
+     inline = "1", 
+     group = vol_grp, 
+     tooltip = "Select the custom timeframe for detecting volume of Fair Value Gaps. To use this setting, turn off the 'Auto' toggle. Otherwise, the indicator will follow the chart's 10 times lower timeframe automatically."
+ )
+vol_hideVP = input.bool(true, "Display", group = vol_grp)
+vol_bins   = input.int(15, "Resolution", group = vol_grp)
+vol_gap_filter = input.float(0.5, 'Filter Gaps', step = 0.01, group = vol_grp)
+vol_bull_color = input.color(#1da370, 'Bullish Color', group = vol_grp)
+vol_bear_color = input.color(#bc25d6, 'Bearish Color', group = vol_grp)
+
+type v_fvg 
+    box FVG 
+    bool isBull
+    array<float> volumeProfile
+    array<box> volumeBoxes
+    line poc
+    label pocLbl
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 📌 INDICATOR CALCULATIONS
+// --------------------------------------------------------------------------------------------------------------------{
+vol_time_ = timeframe.in_seconds(vol_tf1)/60
+vol_currentTime = timeframe.in_seconds("")/60
+
+// Warning 
+if vol_time_ >= vol_currentTime and not vol_autoTf
+    label.delete(label.new(bar_index+3, hl2, "⚠️ Use Lower Timeframes or 'Auto mode'\nin settings", style = label.style_label_center, color = color.rgb(255, 0, 0), size = size.huge)[1])
+
+array<float>   vol_c       = request.security_lower_tf('', vol_time_ >= vol_currentTime and not vol_autoTf ? "" : (vol_autoTf ? str.tostring(int(vol_currentTime/10)) : vol_tf1), close)
+array<float>   vol_v       = request.security_lower_tf('', vol_time_ >= vol_currentTime and not vol_autoTf ? "" : (vol_autoTf ? str.tostring(int(vol_currentTime/10)) : vol_tf1), volume)
+
+float vol_bearish_gap_size = (low[2] - high) / ta.stdev(low[2] - high, 200)
+float vol_bullish_gap_size = (low - high[2]) / ta.stdev(low - high[2], 200)
+
+cp_detectFVG() =>
+    var pocLblAllow = true
+    var fvgs    = array.new<v_fvg>()
+    volumeP     = array.new<float>(vol_bins, 0.)
+    volumeBoxes = array.new<box>(vol_bins, box(na))
+    poc         = line(na)
+    pocLbl      = label(na)
+
+    // Conditions to detect bullish and bearish gaps
+    bool bullish_gap_condition = low > high[2] and high[1] > high[2] and vol_bullish_gap_size > vol_gap_filter
+    bool bearish_gap_condition = high < low[2] and low[1] < low[2] and vol_bearish_gap_size > vol_gap_filter
+
+    cls_array = vol_c[1]
+    vol_array = vol_v[1]
+
+    // Bullish FVG logic
+    if bullish_gap_condition
+        pocLblAllow := false
+        fvg_lower = high[2]
+        fvg_upper = low
+
+        fvg_box = box.new(bar_index - 1, fvg_upper, bar_index + 3, fvg_lower, border_color = na, border_width = 0, bgcolor = color.new(vol_bull_color, 70))
+
+        binSize = (fvg_upper-fvg_lower)/vol_bins
+
+        for k = 0 to vol_bins -1
+            volumeP.set(k, 0.)
+
+        if cls_array.size() > 0
+            for k = 0 to vol_bins -1
+
+                lower = fvg_lower + binSize * k 
+                mid = lower + binSize/2
+                for i = 0 to cls_array.size() - 1
+         
+                    cls = cls_array.get(i)
+                    vol = vol_array.get(i)
+
+                    if math.abs(cls-mid) <= binSize
+                        volumeP.set(k, volumeP.get(k) + vol)
+
+        for k = 0 to vol_bins -1
+            
+            lower = fvg_lower + binSize * k 
+            upper = lower + binSize
+            mid = lower + binSize/2
+
+            volumeBoxes.set(k, box.new(bar_index-1, upper, bar_index-1, lower, border_width = 0))
+
+            vol = volumeP.get(k)
+            if volumeP.max() != 0 
+                if vol == volumeP.max() and not pocLblAllow
+                    poc    := line.new(bar_index-1, mid, bar_index-1, mid, color = vol_bull_color)
+                    pocLbl := label.new(bar_index-1, mid, str.tostring(volumeP.max(), format.volume), style = label.style_label_left, color = vol_bull_color, textcolor = chart.fg_color)
+                    pocLblAllow := true
+
+        fvgs.push(v_fvg.new(fvg_box, true, volumeP, volumeBoxes, poc, pocLbl))
+
+    // Bearish FVG logic
+    if bearish_gap_condition
+        pocLblAllow := false
+        fvg_upper = low[2]
+        fvg_lower = high
+
+        fvg_box = box.new(bar_index - 1, fvg_upper, bar_index + 3, fvg_lower, border_color = na, border_width = 0, bgcolor = color.new(vol_bear_color, 70))
+
+
+        binSize = (fvg_upper-fvg_lower)/vol_bins
+
+        for k = 0 to vol_bins -1
+            volumeP.set(k, 0.)
+
+        if cls_array.size() > 0
+            for k = 0 to vol_bins -1
+
+                lower = fvg_lower + binSize * k 
+                mid = lower + binSize/2
+
+                for i = 0 to cls_array.size() - 1
+
+                    cls = cls_array.get(i)
+                    vol = vol_array.get(i)
+
+                    if math.abs(cls-mid) <= binSize
+                        volumeP.set(k, volumeP.get(k) + vol)
+
+        for k = 0 to vol_bins -1
+
+            lower = fvg_lower + binSize * k 
+            upper = lower + binSize
+            mid = lower + binSize/2
+            vol = volumeP.get(k)
+
+            volumeBoxes.set(k, box.new(bar_index-1, upper, bar_index-1, lower, border_width = 0))
+
+
+            if volumeP.max() != 0  and not pocLblAllow
+                if vol == volumeP.max()
+                    poc := line.new(bar_index-1, mid, bar_index-1, mid, color = vol_bear_color)
+                    pocLbl := label.new(bar_index-1, mid, str.tostring(volumeP.max()*-1, format.volume), style = label.style_label_left, color = vol_bear_color, textcolor = chart.fg_color)
+                    pocLblAllow := true
+
+
+        fvgs.push(v_fvg.new(fvg_box, false, volumeP, volumeBoxes, poc, pocLbl))
+
+
+    if fvgs.size() > 10
+        f = fvgs.shift()
+        f.FVG.delete()
+        f.poc.delete()
+        f.pocLbl.delete()
+
+
+        for b in  f.volumeBoxes
+            b.delete()
+
+
+    if fvgs.size() > 0
+
+        for f in fvgs
+
+            f.FVG.set_right(bar_index+25)
+
+            top = f.FVG.get_top()
+            bot = f.FVG.get_bottom()
+            left = f.FVG.get_left()
+            right = f.FVG.get_right()
+            binSize = (top-bot)/vol_bins
+
+            boxes = f.volumeBoxes
+
+            f.poc.set_x2(right)
+            f.pocLbl.set_x(right)
+            
+            f.FVG.set_text(str.tostring(f.volumeProfile.sum(), format.volume))
+            f.FVG.set_text_halign(text.align_right)
+            if f.isBull
+                f.FVG.set_text_valign(text.align_bottom)
+            else 
+                f.FVG.set_text_valign(text.align_top)
+
+            f.FVG.set_text_size(size.normal)
+            f.FVG.set_text_color(chart.fg_color)
+            
+            if f.isBull
+                
+                if low < f.FVG.get_bottom()
+                    f.FVG.delete()
+                    for b in boxes
+                        b.delete()
+                    f.poc.delete()
+                    f.pocLbl.delete()
+                    
+                    fvgs.remove(fvgs.indexof(f))
+
+                for k = 0 to vol_bins -1
+
+                    lower = bot + binSize * k 
+                    upper = lower + binSize
+
+                    volSum   = f.volumeProfile.max()
+                    volRatio = f.volumeProfile.get(k) / volSum * 50
+                    step = (right-left)/100
+                    boxWidth = math.round(volRatio * step)
+                    box_id = boxes.get(k)
+                    
+                    bgColor = color.from_gradient(f.volumeProfile.get(k), 0, f.volumeProfile.max(), color.new(vol_bull_color, 100), vol_bull_color)
+
+                    if boxWidth != 0 and vol_hideVP
+
+                        box_id.set_right(left+boxWidth)
+                        box_id.set_bgcolor(bgColor)
+
+            else
+        
+                if high > f.FVG.get_top()
+                    f.FVG.delete()                    
+                    for b in boxes
+                        b.delete()
+                    f.poc.delete()
+                    f.pocLbl.delete()
+
+                    fvgs.remove(fvgs.indexof(f))
+
+                for k = 0 to vol_bins -1
+
+                    lower = bot + binSize * k 
+                    upper = lower + binSize
+
+                    volSum   = f.volumeProfile.max()
+                    volRatio = f.volumeProfile.get(k) / volSum
+
+                    boxWidth = math.round(volRatio * (right-left)/2.5)
+                    box_id = boxes.get(k)
+                    
+                    bgColor = color.from_gradient(f.volumeProfile.get(k), 0, f.volumeProfile.max(), color.new(vol_bear_color, 100), vol_bear_color)
+
+                    if boxWidth != 0 and vol_hideVP
+                        box_id.set_right(left+boxWidth)
+                        box_id.set_bgcolor(bgColor)
+
+// Execution only if Volume FVG switch is ON
+if vol_enable_fvg
+    cp_detectFVG()
+
+//=============================================================================
+// 11. LIQUIDITY CONCEPTS (BSL/SSL) - [FIXED]
+//=============================================================================
+// Settings
+liq_grp = "11. Liquidity Concepts (BSL/SSL)"
+liq_show = input.bool(true, "Show BSL/SSL Lines", group = liq_grp)
+liq_length = input.int(10, "Pivot Length", minval=2, group = liq_grp)
+liq_bsl_css = input.color(color.new(#f23645, 20), "BSL Color (Red)", group = liq_grp)
+liq_ssl_css = input.color(color.new(#089981, 20), "SSL Color (Green)", group = liq_grp)
+
+// Logic
+liq_ph = ta.pivothigh(liq_length, liq_length)
+liq_pl = ta.pivotlow(liq_length, liq_length)
+
+// Array to manage lines
+var line[] liq_bsl_lines = array.new_line()
+var line[] liq_ssl_lines = array.new_line()
+var label[] liq_bsl_labels = array.new_label()
+var label[] liq_ssl_labels = array.new_label()
+
+// Function to remove old liquidity lines when hit (Sweep Detection)
+liq_check_sweep(lines_arr, labels_arr, is_bsl) =>
+    if array.size(lines_arr) > 0
+        for i = array.size(lines_arr) - 1 to 0
+            ln = array.get(lines_arr, i)
+            val = line.get_y1(ln)
+            // Condition: if price touches the line
+            bool hit = is_bsl ? high >= val : low <= val
+            
+            if hit
+                line.delete(ln)
+                array.remove(lines_arr, i)
+                // Remove associated label
+                if array.size(labels_arr) > i
+                    lb = array.get(labels_arr, i)
+                    label.delete(lb)
+                    array.remove(labels_arr, i)
+                int(na) // FIX: Force return int type
+            else
+                // Extend if not hit
+                line.set_x2(ln, bar_index + 5)
+                if array.size(labels_arr) > i
+                    lb = array.get(labels_arr, i)
+                    label.set_x(lb, bar_index + 5)
+                int(na) // FIX: Force return int type
+
+if liq_show
+    // Create BSL (Pivot High)
+    if not na(liq_ph)
+        l = line.new(bar_index[liq_length], liq_ph, bar_index + 5, liq_ph, color=liq_bsl_css, style=line.style_dashed)
+        array.push(liq_bsl_lines, l)
+        // Add Label
+        lb = label.new(bar_index + 5, liq_ph, "BSL", color=color(na), textcolor=liq_bsl_css, style=label.style_label_down, size=size.tiny)
+        array.push(liq_bsl_labels, lb)
+
+    // Create SSL (Pivot Low)
+    if not na(liq_pl)
+        l = line.new(bar_index[liq_length], liq_pl, bar_index + 5, liq_pl, color=liq_ssl_css, style=line.style_dashed)
+        array.push(liq_ssl_lines, l)
+        // Add Label
+        lb = label.new(bar_index + 5, liq_pl, "SSL", color=color(na), textcolor=liq_ssl_css, style=label.style_label_up, size=size.tiny)
+        array.push(liq_ssl_labels, lb)
+
+    // Manage Lines
+    liq_check_sweep(liq_bsl_lines, liq_bsl_labels, true)
+    liq_check_sweep(liq_ssl_lines, liq_ssl_labels, false)
+
+    // Limit Max Lines to prevent lag (keep last 10)
+    if array.size(liq_bsl_lines) > 10
+        line.delete(array.shift(liq_bsl_lines))
+        label.delete(array.shift(liq_bsl_labels))
+    if array.size(liq_ssl_lines) > 10
+        line.delete(array.shift(liq_ssl_lines))
+        label.delete(array.shift(liq_ssl_labels))
+
+//=============================================================================
+// 12. KILLZONES (LuxAlgo Box Style)
+//=============================================================================
+kz_grp = "12. Killzones (LuxAlgo Style)"
+kz_show = input.bool(true, "Show Killzones", group=kz_grp)
+kz_asia_ses = input.session("2000-0000", "Asia Range (NY Time)", group=kz_grp)
+kz_lon_ses = input.session("0200-0500", "London Open (NY Time)", group=kz_grp)
+kz_ny_ses = input.session("0700-1000", "New York Open (NY Time)", group=kz_grp)
+
+kz_asia_css = input.color(color.new(#e91e63, 90), "Asia Color", group=kz_grp)
+kz_lon_css = input.color(color.new(#2157f3, 90), "London Color", group=kz_grp)
+kz_ny_css = input.color(color.new(#ff5d00, 90), "New York Color", group=kz_grp)
+
+kz_txt_col = input.color(color.white, "Label Color", group=kz_grp)
+kz_tz = input.string("America/New_York", "Timezone", group=kz_grp)
+
+// Function to draw LuxAlgo style range boxes
+draw_kz_box(sess, css, txt) =>
+    is_sess = not na(time(timeframe.period, sess, kz_tz))
+    var box b = na
+    var label l = na
+    var float h = na
+    var float lo = na
+    
+    // Start of Session
+    if is_sess and not is_sess[1]
+        h := high
+        lo := low
+        b := box.new(bar_index, h, bar_index, lo, border_color = css, bgcolor = css, border_style = line.style_dotted)
+        l := label.new(bar_index, h, txt, textcolor = kz_txt_col, style = label.style_label_down, color = color.new(color.white, 100), size = size.tiny)
+    
+    // During Session
+    else if is_sess
+        h := math.max(high, box.get_top(b))
+        lo := math.min(low, box.get_bottom(b))
+        box.set_top(b, h)
+        box.set_bottom(b, lo)
+        box.set_right(b, bar_index)
+        label.set_xy(l, int(math.avg(box.get_left(b), bar_index)), h)
+        
+    [is_sess ? na : h, is_sess ? na : lo] // Return high/low when session ends (optional for extensions)
+
+if kz_show
+    draw_kz_box(kz_asia_ses, kz_asia_css, "Asia")
+    draw_kz_box(kz_lon_ses, kz_lon_css, "London")
+    draw_kz_box(kz_ny_ses, kz_ny_css, "New York")
